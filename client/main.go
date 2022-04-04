@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -14,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -34,10 +34,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	var (
-		reply = make([]byte, lenBuff)
-		wait  = sync.WaitGroup{}
-	)
+	wait := sync.WaitGroup{}
 
 	wait.Add(1)
 
@@ -46,48 +43,7 @@ func main() {
 
 		// write on connection
 		for {
-			number, err := bufio.NewReader(os.Stdin).Read(reply)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			if bytes.HasPrefix(reply[:number], []byte("PUBK-")) && publicKey == nil {
-				auxPublicKey := bytes.TrimPrefix(reply[:number-1], []byte("PUBK-"))
-
-				dst := make([]byte, hex.DecodedLen(len(auxPublicKey)))
-
-				n, err := hex.Decode(dst, auxPublicKey)
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				publicKey, err = x509.ParsePKCS1PublicKey(dst[:n])
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				continue
-			}
-
-			if bytes.HasPrefix(reply[:number], []byte("PRIVK-")) && privateKey == nil {
-				auxPrivateKey := bytes.TrimPrefix(reply[:number-1], []byte("PRIVK-"))
-
-				dst := make([]byte, hex.DecodedLen(len(auxPrivateKey)))
-
-				n, err := hex.Decode(dst, auxPrivateKey)
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				privateKey, err = x509.ParsePKCS1PrivateKey(dst[:n])
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				continue
-			}
-
-			err = writeOnConn(conn, reply[:number])
+			err = writeOnConn(conn)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -96,7 +52,7 @@ func main() {
 
 	// read from connection
 	for {
-		err = readFromConn(conn, reply)
+		err = readFromConn(conn)
 		if err != nil {
 			log.Print(err)
 
@@ -109,10 +65,11 @@ func main() {
 
 // readFromConn Read message from conn (message from server or from other client)
 //  @param1 (conn): connection
-//  @param2 (reply): reply buffer
 //
 //  @return1 (err): error variable
-func readFromConn(conn net.Conn, reply []byte) (err error) {
+func readFromConn(conn net.Conn) (err error) {
+	reply := make([]byte, lenBuff)
+
 	number, err := conn.Read(reply)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -125,29 +82,7 @@ func readFromConn(conn net.Conn, reply []byte) (err error) {
 	if privateKey == nil {
 		fmt.Print(string(reply[:number]))
 
-		return
-	}
-
-	// fmt.Printf("----- de -----%x\n", x509.MarshalPKCS1PrivateKey(privateKey))
-
-	decrypt, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, reply[:number], nil)
-	if err != nil {
-		return
-	}
-
-	fmt.Println(string(decrypt))
-
-	return
-}
-
-// writeOnConn Write message on conn
-//  @param1 (conn): connection
-//  @param2 (reply): reply buffer
-//
-//  @return1 (err): error variable
-func writeOnConn(conn net.Conn, reply []byte) (err error) {
-	if publicKey == nil {
-		_, err = conn.Write(reply)
+		err = getKeysFromMessage(string(reply[:number]))
 		if err != nil {
 			return
 		}
@@ -155,9 +90,42 @@ func writeOnConn(conn net.Conn, reply []byte) (err error) {
 		return
 	}
 
-	// fmt.Printf("----- en -----%x\n", x509.MarshalPKCS1PublicKey(publicKey))
+	fmt.Printf("--%x\n", x509.MarshalPKCS1PrivateKey(privateKey))
 
-	encrypt, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, reply, nil)
+	decrypt, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, reply[:number], nil)
+	if err != nil {
+		return
+	}
+
+	fmt.Println("(s) -", string(decrypt))
+
+	return
+}
+
+// writeOnConn Write message on conn
+//  @param1 (conn): connection
+//
+//  @return1 (err): error variable
+func writeOnConn(conn net.Conn) (err error) {
+	reply := make([]byte, lenBuff)
+
+	number, err := bufio.NewReader(os.Stdin).Read(reply)
+	if err != nil {
+		return
+	}
+
+	if publicKey == nil {
+		_, err = conn.Write(reply[:number])
+		if err != nil {
+			return
+		}
+
+		return
+	}
+
+	fmt.Printf("--%x\n", x509.MarshalPKCS1PublicKey(publicKey))
+
+	encrypt, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, reply[:number], nil)
 	if err != nil {
 		return
 	}
@@ -165,6 +133,46 @@ func writeOnConn(conn net.Conn, reply []byte) (err error) {
 	_, err = conn.Write(encrypt)
 	if err != nil {
 		return
+	}
+
+	return
+}
+
+func getKeysFromMessage(message string) (err error) {
+	var num int
+
+	// private
+	if strings.Contains(message, "PRIVK-") {
+		aux := message[strings.Index(string(message), "PRIVK-"):]
+		auxPrivKey := strings.TrimPrefix(aux[:strings.Index(aux, "\n")], "PRIVK-")
+		dst := make([]byte, hex.DecodedLen(len(auxPrivKey)))
+
+		num, err = hex.Decode(dst, []byte(auxPrivKey))
+		if err != nil {
+			return
+		}
+
+		privateKey, err = x509.ParsePKCS1PrivateKey(dst[:num])
+		if err != nil {
+			return
+		}
+	}
+
+	// public
+	if strings.Contains(message, "PUBK-") {
+		aux := message[strings.Index(message, "PUBK-"):]
+		auxPubKey := strings.TrimPrefix(aux[:strings.Index(aux, "\n")], "PUBK-")
+		dst := make([]byte, hex.DecodedLen(len(auxPubKey)))
+
+		num, err = hex.Decode(dst, []byte(auxPubKey))
+		if err != nil {
+			return
+		}
+
+		publicKey, err = x509.ParsePKCS1PublicKey(dst[:num])
+		if err != nil {
+			return
+		}
 	}
 
 	return

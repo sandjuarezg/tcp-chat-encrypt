@@ -14,11 +14,6 @@ import (
 	"time"
 )
 
-type keys struct {
-	privateKey []byte
-	publicKey  []byte
-}
-
 const lenBuff = 1024
 const args = 2
 const limitConn = 2
@@ -41,7 +36,9 @@ func main() {
 	for {
 		conn, err := listen.Accept()
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
+
+			return
 		}
 
 		go handleRequest(conn)
@@ -53,99 +50,68 @@ func main() {
 func handleRequest(conn net.Conn) {
 	defer conn.Close()
 
-	mess := " - Welcome to chat - \nEnter your name: "
+	var (
+		res   = bufio.NewReader(conn)
+		reply = make([]byte, lenBuff)
+	)
 
 	// write message
-	_, err := conn.Write([]byte(mess))
+	_, err := conn.Write([]byte(" - Welcome to chat - \nEnter your name: "))
 	if err != nil {
-		log.Fatal(err)
-	}
+		log.Print(err)
 
-	reply := make([]byte, lenBuff)
+		return
+	}
 
 	// read user name
-	res := bufio.NewReader(conn)
-
 	number, err := res.Read(reply)
 	if err != nil {
-		log.Fatal(err)
-	}
-
-	// check number of connected users
-	if len(conns) > 1 {
-		_, err = conn.Write([]byte("Chat full, try again later\n"))
-		if err != nil {
-			log.Fatal(err)
-		}
+		log.Print(err)
 
 		return
 	}
 
 	name := reply[:number-1]
 
+	// append connection
 	conns = append(conns, conn)
 
-	// generate keys
-	var (
-		user1 keys
-		user2 keys
-	)
-
-	if len(conns) == limitConn {
-		// keys user1
-		auxPrivateKey, err := rsa.GenerateKey(rand.Reader, lenBuff)
+	// check number of connected users
+	if len(conns) > limitConn {
+		_, err = conn.Write([]byte("Chat full, try again later\n"))
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
+
+			return
 		}
 
-		user1.privateKey = x509.MarshalPKCS1PrivateKey(auxPrivateKey)
-		auxPublicKey := &auxPrivateKey.PublicKey
-		user1.publicKey = x509.MarshalPKCS1PublicKey(auxPublicKey)
-
-		// keys user2
-		auxPrivateKey, err = rsa.GenerateKey(rand.Reader, lenBuff)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		user2.privateKey = x509.MarshalPKCS1PrivateKey(auxPrivateKey)
-		auxPublicKey = &auxPrivateKey.PublicKey
-		user2.publicKey = x509.MarshalPKCS1PublicKey(auxPublicKey)
+		return
 	}
 
-	fmt.Printf("%s connected\n", name)
+	fmt.Println(string(name), "connected")
 
-	mess = fmt.Sprintf(" - %s connected - \n", name)
-	mess += fmt.Sprintf(" - %d connected users - \n", len(conns))
+	// generate keys
+	var messKey string
+
+	if len(conns) == limitConn {
+		privateKey, publicKey, err := generateKeysInBytes()
+		if err != nil {
+			log.Print(err)
+
+			return
+		}
+
+		messKey = fmt.Sprintf("\nThis is your private key:\nPRIVK-%x\n\n", privateKey)
+		messKey += fmt.Sprintf("\nThis is your public key:\nPUBK-%x\n\n", publicKey)
+	}
 
 	// write message to all connections
 	for _, element := range conns {
-		_, err = element.Write([]byte(mess))
+		_, err = element.Write([]byte(fmt.Sprintf(" - %s connected - \n%s", name, messKey)))
 		if err != nil {
-			log.Fatal(err)
-		}
+			log.Print(err)
 
-		var (
-			pubK  []byte
-			privK []byte
-		)
-
-		if len(conns) == limitConn {
-			if element == conn {
-				pubK = user1.publicKey
-				privK = user2.privateKey
-			} else {
-				pubK = user2.publicKey
-				privK = user1.privateKey
-			}
-
-			messKey := fmt.Sprintf("Enter this code:\nPUBK-%x\n\n", pubK)
-			messKey += fmt.Sprintf("Enter this code:\nPRIVK-%x\n\n", privK)
-
-			_, err = element.Write([]byte(messKey))
-			if err != nil {
-				log.Fatal(err)
-			}
+			return
 		}
 	}
 
@@ -155,36 +121,29 @@ func handleRequest(conn net.Conn) {
 		// read text to chat
 		number, err = res.Read(reply)
 		if err != nil || string(reply[:number-1]) == "EXIT" {
-			if errors.Is(err, io.EOF) || string(reply[:number-1]) == "EXIT" {
-				// remove connection from chat
-				for n, element := range conns {
-					if conn == element {
-						conns = append(conns[:n], conns[n+1:]...)
-					}
+			if !errors.Is(err, io.EOF) && string(reply[:number-1]) != "EXIT" {
+				log.Print(err)
 
-					mess = fmt.Sprintf(" - Bye %s - \n", name)
-
-					_, err = element.Write([]byte(mess))
-					if err != nil {
-						log.Fatal(err)
-					}
-				}
-
-				for _, element := range conns {
-					mess = fmt.Sprintf(" - %d connected users - \n", len(conns))
-
-					_, err = element.Write([]byte(mess))
-					if err != nil {
-						log.Fatal(err)
-					}
-				}
-
-				fmt.Printf("%s offline\n", name)
-
-				break
+				return
 			}
 
-			log.Fatal(err)
+			// remove connection from chat
+			for n, element := range conns {
+				if conn == element {
+					conns = append(conns[:n], conns[n+1:]...)
+				}
+
+				_, err = element.Write([]byte(fmt.Sprintf(" - Bye %s - \n", name)))
+				if err != nil {
+					log.Print(err)
+
+					return
+				}
+			}
+
+			fmt.Println(string(name), "offline")
+
+			return
 		}
 
 		if string(reply[:number]) == "\n" {
@@ -198,9 +157,25 @@ func handleRequest(conn net.Conn) {
 
 				_, err = element.Write([]byte(fmt.Sprintf("%s (%s): %s", name, t, reply[:number])))
 				if err != nil {
-					log.Fatal(err)
+					log.Print(err)
+
+					return
 				}
 			}
 		}
 	}
+}
+
+func generateKeysInBytes() (privateKey []byte, publicKey []byte, err error) {
+	auxPrivateKey, err := rsa.GenerateKey(rand.Reader, lenBuff)
+	if err != nil {
+		return
+	}
+
+	privateKey = x509.MarshalPKCS1PrivateKey(auxPrivateKey)
+
+	auxPublicKey := &auxPrivateKey.PublicKey
+	publicKey = x509.MarshalPKCS1PublicKey(auxPublicKey)
+
+	return
 }
