@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -17,11 +18,14 @@ import (
 	"sync"
 )
 
-const lenBuff = 2048
 const args = 2
+const msgParts = 2
+const lenBuff = 1064
 
-var privateKey *rsa.PrivateKey
-var publicKey *rsa.PublicKey
+var (
+	privateKey      *rsa.PrivateKey
+	publicKeyFriend *rsa.PublicKey
+)
 
 func main() {
 	if len(os.Args) != args {
@@ -33,6 +37,65 @@ func main() {
 		log.Fatal(err)
 	}
 	defer conn.Close()
+
+	// read server message
+	reply := make([]byte, lenBuff)
+
+	_, err = conn.Read(reply)
+	if err != nil {
+		log.Print(err)
+
+		return
+	}
+
+	fmt.Print(string(reply))
+
+	// read name
+	number, err := bufio.NewReader(os.Stdin).Read(reply)
+	if err != nil {
+		log.Print(err)
+
+		return
+	}
+
+	// write name on connection
+	_, err = conn.Write(reply[:number])
+	if err != nil {
+		log.Print(err)
+
+		return
+	}
+
+	// read server messages
+	number, err = conn.Read(reply)
+	if err != nil {
+		log.Print(err)
+
+		return
+	}
+
+	// check possible error message
+	if strings.HasPrefix(string(reply[:number]), "ERROR") {
+		log.Print(string(reply[:number]))
+
+		return
+	}
+
+	fmt.Print(string(reply[:number]))
+
+	fmt.Println()
+	fmt.Println(" - To activate secure chat, send this key to your friend- ")
+
+	// generate private key
+	privateKey, err = rsa.GenerateKey(rand.Reader, lenBuff)
+	if err != nil {
+		log.Print(err)
+
+		return
+	}
+
+	// print public key
+	fmt.Printf("PUBK-%x\n\n", x509.MarshalPKCS1PublicKey(&privateKey.PublicKey))
 
 	wait := sync.WaitGroup{}
 
@@ -63,7 +126,7 @@ func main() {
 	wait.Wait()
 }
 
-// readFromConn Read message from conn (message from server or from other client)
+// readFromConn Read message from conn
 //  @param1 (conn): connection
 //
 //  @return1 (err): error variable
@@ -79,25 +142,45 @@ func readFromConn(conn net.Conn) (err error) {
 		return
 	}
 
-	if privateKey == nil {
-		fmt.Print(string(reply[:number]))
+	// check if key was received
+	if strings.Contains(string(reply[:number]), "PUBK-") {
+		_, text := getFormatAndTextFromMessage(reply[:number-1])
 
-		err = getKeysFromMessage(string(reply[:number]))
+		auxPubKey := strings.TrimPrefix(string(text), "PUBK-")
+
+		dst := make([]byte, hex.DecodedLen(len(auxPubKey)))
+
+		number, err = hex.Decode(dst, []byte(auxPubKey))
 		if err != nil {
 			return
 		}
 
+		publicKeyFriend, err = x509.ParsePKCS1PublicKey(dst[:number])
+		if err != nil {
+			return
+		}
+
+		fmt.Println(" - Your friend has sent his key - ")
+
 		return
 	}
 
-	fmt.Printf("--%x\n", x509.MarshalPKCS1PrivateKey(privateKey))
+	// no key, show message without security
+	if publicKeyFriend == nil {
+		fmt.Print(string(reply[:number]))
 
-	decrypt, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, reply[:number], nil)
+		return
+	}
+
+	format, text := getFormatAndTextFromMessage(reply[:number])
+
+	decrypt, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, text, nil)
 	if err != nil {
 		return
 	}
 
-	fmt.Println("(s) -", string(decrypt))
+	// show message security
+	fmt.Printf("(s)-%s: %s", format, decrypt)
 
 	return
 }
@@ -114,7 +197,8 @@ func writeOnConn(conn net.Conn) (err error) {
 		return
 	}
 
-	if publicKey == nil {
+	// check if key was written
+	if strings.Contains(string(reply)[:number], "PUBK-") || publicKeyFriend == nil {
 		_, err = conn.Write(reply[:number])
 		if err != nil {
 			return
@@ -123,9 +207,7 @@ func writeOnConn(conn net.Conn) (err error) {
 		return
 	}
 
-	fmt.Printf("--%x\n", x509.MarshalPKCS1PublicKey(publicKey))
-
-	encrypt, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, reply[:number], nil)
+	encrypt, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKeyFriend, reply[:number], nil)
 	if err != nil {
 		return
 	}
@@ -138,41 +220,17 @@ func writeOnConn(conn net.Conn) (err error) {
 	return
 }
 
-func getKeysFromMessage(message string) (err error) {
-	var num int
+// getFormatAndTextFromMessage Get separate message format and text
+//  @param1 (mess): message
+//
+//  @return1 (format): part of the message format
+//  @return1 (text): part of the message text
+func getFormatAndTextFromMessage(mess []byte) (format, text []byte) {
+	messSlice := bytes.Split(mess, []byte(": "))
 
-	// private
-	if strings.Contains(message, "PRIVK-") {
-		aux := message[strings.Index(string(message), "PRIVK-"):]
-		auxPrivKey := strings.TrimPrefix(aux[:strings.Index(aux, "\n")], "PRIVK-")
-		dst := make([]byte, hex.DecodedLen(len(auxPrivKey)))
-
-		num, err = hex.Decode(dst, []byte(auxPrivKey))
-		if err != nil {
-			return
-		}
-
-		privateKey, err = x509.ParsePKCS1PrivateKey(dst[:num])
-		if err != nil {
-			return
-		}
-	}
-
-	// public
-	if strings.Contains(message, "PUBK-") {
-		aux := message[strings.Index(message, "PUBK-"):]
-		auxPubKey := strings.TrimPrefix(aux[:strings.Index(aux, "\n")], "PUBK-")
-		dst := make([]byte, hex.DecodedLen(len(auxPubKey)))
-
-		num, err = hex.Decode(dst, []byte(auxPubKey))
-		if err != nil {
-			return
-		}
-
-		publicKey, err = x509.ParsePKCS1PublicKey(dst[:num])
-		if err != nil {
-			return
-		}
+	if len(messSlice) == msgParts {
+		format = messSlice[0]
+		text = messSlice[1]
 	}
 
 	return

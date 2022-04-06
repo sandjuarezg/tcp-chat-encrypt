@@ -2,9 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +28,7 @@ func main() {
 	}
 	defer listen.Close()
 
-	fmt.Printf("Listening on %s\n", listen.Addr())
+	fmt.Println("Listening on", listen.Addr())
 
 	for {
 		conn, err := listen.Accept()
@@ -71,14 +68,9 @@ func handleRequest(conn net.Conn) {
 		return
 	}
 
-	name := reply[:number-1]
-
-	// append connection
-	conns = append(conns, conn)
-
 	// check number of connected users
-	if len(conns) > limitConn {
-		_, err = conn.Write([]byte("Chat full, try again later\n"))
+	if len(conns) > limitConn-1 {
+		_, err = conn.Write([]byte("ERROR: Chat full, try again later\n"))
 		if err != nil {
 			log.Print(err)
 
@@ -88,26 +80,16 @@ func handleRequest(conn net.Conn) {
 		return
 	}
 
+	name := reply[:number-1]
+
+	// append connection
+	conns = append(conns, conn)
+
 	fmt.Println(string(name), "connected")
-
-	// generate keys
-	var messKey string
-
-	if len(conns) == limitConn {
-		privateKey, publicKey, err := generateKeysInBytes()
-		if err != nil {
-			log.Print(err)
-
-			return
-		}
-
-		messKey = fmt.Sprintf("\nThis is your private key:\nPRIVK-%x\n\n", privateKey)
-		messKey += fmt.Sprintf("\nThis is your public key:\nPUBK-%x\n\n", publicKey)
-	}
 
 	// write message to all connections
 	for _, element := range conns {
-		_, err = element.Write([]byte(fmt.Sprintf(" - %s connected - \n%s", name, messKey)))
+		_, err = element.Write([]byte(fmt.Sprintf(" - %s connected - \n", name)))
 		if err != nil {
 			log.Print(err)
 
@@ -164,18 +146,4 @@ func handleRequest(conn net.Conn) {
 			}
 		}
 	}
-}
-
-func generateKeysInBytes() (privateKey []byte, publicKey []byte, err error) {
-	auxPrivateKey, err := rsa.GenerateKey(rand.Reader, lenBuff)
-	if err != nil {
-		return
-	}
-
-	privateKey = x509.MarshalPKCS1PrivateKey(auxPrivateKey)
-
-	auxPublicKey := &auxPrivateKey.PublicKey
-	publicKey = x509.MarshalPKCS1PublicKey(auxPublicKey)
-
-	return
 }
