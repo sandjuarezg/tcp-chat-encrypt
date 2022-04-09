@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -95,6 +96,15 @@ func handleRequest(conn net.Conn) {
 
 			return
 		}
+
+		if len(conns) == limitConn {
+			_, err = element.Write([]byte(" - NOTICE: start secure chat - \n"))
+			if err != nil {
+				log.Print(err)
+
+				return
+			}
+		}
 	}
 
 	for {
@@ -135,6 +145,18 @@ func handleRequest(conn net.Conn) {
 		// write message to all connections
 		for _, element := range conns {
 			if element != conn {
+				// check prefix, to not apply formatting
+				if strings.HasPrefix(string(reply[:number]), "PUBK-") {
+					_, err = element.Write(reply[:number])
+					if err != nil {
+						log.Print(err)
+
+						return
+					}
+
+					continue
+				}
+
 				t := time.Now().Format(time.RFC822Z)
 
 				_, err = element.Write([]byte(fmt.Sprintf("%s (%s): %s", name, t, reply[:number])))

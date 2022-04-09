@@ -22,14 +22,11 @@ const args = 2
 const msgParts = 2
 const lenBuff = 1064
 
-var (
-	privateKey      *rsa.PrivateKey
-	publicKeyFriend *rsa.PublicKey
-)
+var errLimit = errors.New("ERROR: Chat full, try again later")
 
 func main() {
 	if len(os.Args) != args {
-		log.Fatal("Insufficient arguments: [port]")
+		log.Fatal("Invalid input: [port]")
 	}
 
 	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%s", os.Args[1]))
@@ -38,66 +35,13 @@ func main() {
 	}
 	defer conn.Close()
 
-	// read server message
-	reply := make([]byte, lenBuff)
+	var (
+		privKey      *rsa.PrivateKey
+		pubKeyFriend *rsa.PublicKey
+		wait         sync.WaitGroup
+	)
 
-	_, err = conn.Read(reply)
-	if err != nil {
-		log.Print(err)
-
-		return
-	}
-
-	fmt.Print(string(reply))
-
-	// read name
-	number, err := bufio.NewReader(os.Stdin).Read(reply)
-	if err != nil {
-		log.Print(err)
-
-		return
-	}
-
-	// write name on connection
-	_, err = conn.Write(reply[:number])
-	if err != nil {
-		log.Print(err)
-
-		return
-	}
-
-	// read server messages
-	number, err = conn.Read(reply)
-	if err != nil {
-		log.Print(err)
-
-		return
-	}
-
-	// check possible error message
-	if strings.HasPrefix(string(reply[:number]), "ERROR") {
-		log.Print(string(reply[:number]))
-
-		return
-	}
-
-	fmt.Print(string(reply[:number]))
-
-	fmt.Println()
-	fmt.Println(" - To activate secure chat, send this key to your friend- ")
-
-	// generate private key
-	privateKey, err = rsa.GenerateKey(rand.Reader, lenBuff)
-	if err != nil {
-		log.Print(err)
-
-		return
-	}
-
-	// print public key
-	fmt.Printf("PUBK-%x\n\n", x509.MarshalPKCS1PublicKey(&privateKey.PublicKey))
-
-	wait := sync.WaitGroup{}
+	wait = sync.WaitGroup{}
 
 	wait.Add(1)
 
@@ -106,7 +50,7 @@ func main() {
 
 		// write on connection
 		for {
-			err = writeOnConn(conn)
+			err = writeOnConn(conn, pubKeyFriend)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -115,7 +59,7 @@ func main() {
 
 	// read from connection
 	for {
-		err = readFromConn(conn)
+		err = readFromConn(conn, privKey, pubKeyFriend)
 		if err != nil {
 			log.Print(err)
 
@@ -128,9 +72,11 @@ func main() {
 
 // readFromConn Read message from conn
 //  @param1 (conn): connection
+//  @param2 (privKey): private key
+//  @param3 (pubKeyFriend): friend public key
 //
 //  @return1 (err): error variable
-func readFromConn(conn net.Conn) (err error) {
+func readFromConn(conn net.Conn, privKey *rsa.PrivateKey, pubKeyFriend *rsa.PublicKey) (err error) {
 	reply := make([]byte, lenBuff)
 
 	number, err := conn.Read(reply)
@@ -142,11 +88,36 @@ func readFromConn(conn net.Conn) (err error) {
 		return
 	}
 
-	// check if key was received
-	if strings.Contains(string(reply[:number]), "PUBK-") {
-		_, text := getFormatAndTextFromMessage(reply[:number-1])
+	// check possible error message
+	if strings.HasPrefix(string(reply[:number]), "ERROR") {
+		err = errLimit
 
-		auxPubKey := strings.TrimPrefix(string(text), "PUBK-")
+		return
+	}
+
+	// check 2 users connected
+	if strings.Contains(string(reply[:number]), "NOTICE") {
+		// generate private key
+		privKey, err = rsa.GenerateKey(rand.Reader, lenBuff)
+		if err != nil {
+			return
+		}
+
+		mess := fmt.Sprintf("PUBK-%x", x509.MarshalPKCS1PublicKey(&privKey.PublicKey))
+
+		_, err = conn.Write([]byte(mess))
+		if err != nil {
+			return
+		}
+
+		fmt.Print(string(reply[:number]))
+
+		return
+	}
+
+	// check if key was received
+	if strings.HasPrefix(string(reply[:number]), "PUBK-") {
+		auxPubKey := strings.TrimPrefix(string(reply[:number]), "PUBK-")
 
 		dst := make([]byte, hex.DecodedLen(len(auxPubKey)))
 
@@ -155,18 +126,15 @@ func readFromConn(conn net.Conn) (err error) {
 			return
 		}
 
-		publicKeyFriend, err = x509.ParsePKCS1PublicKey(dst[:number])
+		pubKeyFriend, err = x509.ParsePKCS1PublicKey(dst[:number])
 		if err != nil {
 			return
 		}
 
-		fmt.Println(" - Your friend has sent his key - ")
-
 		return
 	}
 
-	// no key, show message without security
-	if publicKeyFriend == nil {
+	if pubKeyFriend == nil {
 		fmt.Print(string(reply[:number]))
 
 		return
@@ -174,45 +142,43 @@ func readFromConn(conn net.Conn) (err error) {
 
 	format, text := getFormatAndTextFromMessage(reply[:number])
 
-	decrypt, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, text, nil)
+	decrypt, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privKey, text, nil)
 	if err != nil {
 		return
 	}
 
 	// show message security
-	fmt.Printf("(s)-%s: %s", format, decrypt)
+	fmt.Printf("%s: %s", format, decrypt)
 
 	return
 }
 
 // writeOnConn Write message on conn
 //  @param1 (conn): connection
+//  @param2 (pubKeyFriend): friend public key
 //
 //  @return1 (err): error variable
-func writeOnConn(conn net.Conn) (err error) {
-	reply := make([]byte, lenBuff)
+func writeOnConn(conn net.Conn, pubKeyFriend *rsa.PublicKey) (err error) {
+	var (
+		reply = make([]byte, lenBuff)
+		mess  []byte
+	)
 
 	number, err := bufio.NewReader(os.Stdin).Read(reply)
 	if err != nil {
 		return
 	}
 
-	// check if key was written
-	if strings.Contains(string(reply)[:number], "PUBK-") || publicKeyFriend == nil {
-		_, err = conn.Write(reply[:number])
+	mess = reply[:number]
+
+	if pubKeyFriend != nil {
+		mess, err = rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKeyFriend, reply[:number], nil)
 		if err != nil {
 			return
 		}
-
-		return
 	}
 
-	encrypt, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKeyFriend, reply[:number], nil)
-	if err != nil {
-		return
-	}
-
-	_, err = conn.Write(encrypt)
+	_, err = conn.Write(mess)
 	if err != nil {
 		return
 	}
