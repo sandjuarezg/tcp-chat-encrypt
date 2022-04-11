@@ -12,11 +12,17 @@ import (
 	"time"
 )
 
-const lenBuff = 1024
-const args = 2
-const limitConn = 2
+const (
+	lenBuff   = 1024
+	args      = 2
+	limitConn = 2
+)
 
-var conns []net.Conn
+// user connection structure.
+type connUser struct {
+	name string   // name
+	conn net.Conn // connection
+}
 
 func main() {
 	if len(os.Args) != args {
@@ -31,6 +37,9 @@ func main() {
 
 	fmt.Println("Listening on", listen.Addr())
 
+	var conns []connUser
+	pConns := &conns
+
 	for {
 		conn, err := listen.Accept()
 		if err != nil {
@@ -39,19 +48,17 @@ func main() {
 			return
 		}
 
-		go handleRequest(conn)
+		go handleRequest(conn, pConns)
 	}
 }
 
 // handleRequest Handle client request
 //  @param1 (conn): connection between client and server
-func handleRequest(conn net.Conn) {
+//  @param2 (pConns): connections pointer
+func handleRequest(conn net.Conn, pConns *[]connUser) {
 	defer conn.Close()
 
-	var (
-		res   = bufio.NewReader(conn)
-		reply = make([]byte, lenBuff)
-	)
+	reply := make([]byte, lenBuff)
 
 	// write message
 	_, err := conn.Write([]byte(" - Welcome to chat - \nEnter your name: "))
@@ -62,7 +69,7 @@ func handleRequest(conn net.Conn) {
 	}
 
 	// read user name
-	number, err := res.Read(reply)
+	number, err := bufio.NewReader(conn).Read(reply)
 	if err != nil {
 		log.Print(err)
 
@@ -70,11 +77,9 @@ func handleRequest(conn net.Conn) {
 	}
 
 	// check number of connected users
-	if len(conns) > limitConn-1 {
+	if len(*pConns) > limitConn-1 {
 		_, err = conn.Write([]byte("ERROR: Chat full, try again later\n"))
 		if err != nil {
-			log.Print(err)
-
 			return
 		}
 
@@ -82,15 +87,130 @@ func handleRequest(conn net.Conn) {
 	}
 
 	name := reply[:number-1]
+	user := connUser{name: string(name), conn: conn}
 
 	// append connection
-	conns = append(conns, conn)
+	*pConns = append(*pConns, user)
 
-	fmt.Println(string(name), "connected")
+	fmt.Println(user.name, "connected")
 
 	// write message to all connections
+	err = writeAllConns(*pConns, user)
+	if err != nil {
+		return
+	}
+
+	for {
+		err = readAndWriteOnConn(*pConns, user)
+		if err != nil {
+			log.Print(err)
+
+			break
+		}
+	}
+}
+
+// readAndWriteOnConn Read and write on connection
+//  @param1 (conns): connection slice
+//  @param2 (user): structure variable user
+//
+//  @return1 (err): error variable
+func readAndWriteOnConn(conns []connUser, user connUser) (err error) {
+	reply := make([]byte, lenBuff)
+
+	// read text to chat
+	number, err := bufio.NewReader(user.conn).Read(reply)
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			return
+		}
+
+		// remove connection from chat
+		err = deleteConn(conns, user)
+		if err != nil {
+			return
+		}
+
+		fmt.Println(user.name, "offline")
+
+		return
+	}
+
+	// write message to all connections
+	err = writeAllExceptCurrentConn(conns, user, reply[:number])
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+// deleteConn Delete connection from server
+//  @param1 (conns): connection slice
+//  @param2 (user): structure variable user
+//
+//  @return1 (err): error variable
+func deleteConn(conns []connUser, user connUser) (err error) {
+	for n, element := range conns {
+		if user.conn == element.conn {
+			conns = append(conns[:n], conns[n+1:]...)
+		}
+
+		_, err = element.conn.Write([]byte(fmt.Sprintf(" - Bye %s - \n", user.name)))
+		if err != nil {
+			return
+		}
+	}
+
+	return
+}
+
+// writeAllExceptCurrentConn Write to all except the current connection
+//  @param1 (conns): connection slice
+//  @param2 (user): structure variable user
+//  @param3 (mess): message to write
+//
+//  @return1 (err): error variable
+func writeAllExceptCurrentConn(conns []connUser, user connUser, mess []byte) (err error) {
+	if string(mess) == "\n" {
+		return
+	}
+
 	for _, element := range conns {
-		_, err = element.Write([]byte(fmt.Sprintf(" - %s connected - \n", name)))
+		if element.conn != user.conn {
+			// check prefix, to not apply formatting
+			if strings.HasPrefix(string(mess), "PUBK-") {
+				_, err = element.conn.Write(mess)
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
+			_, err = element.conn.Write([]byte(fmt.Sprintf(
+				"%s (%s): %s",
+				user.name,
+				time.Now().Format(time.RFC822Z),
+				mess),
+			))
+			if err != nil {
+				return
+			}
+		}
+	}
+
+	return
+}
+
+// writeAllConns Write to all connections
+//  @param1 (conns): connection slice
+//  @param2 (user): structure variable user
+//
+//  @return1 (err): error variable
+func writeAllConns(conns []connUser, user connUser) (err error) {
+	for _, element := range conns {
+		_, err = element.conn.Write([]byte(fmt.Sprintf(" - %s connected - \n", user.name)))
 		if err != nil {
 			log.Print(err)
 
@@ -98,7 +218,7 @@ func handleRequest(conn net.Conn) {
 		}
 
 		if len(conns) == limitConn {
-			_, err = element.Write([]byte(" - NOTICE: start secure chat - \n"))
+			_, err = element.conn.Write([]byte(" - NOTICE: start secure chat - \n"))
 			if err != nil {
 				log.Print(err)
 
@@ -107,65 +227,5 @@ func handleRequest(conn net.Conn) {
 		}
 	}
 
-	for {
-		reply = make([]byte, lenBuff)
-
-		// read text to chat
-		number, err = res.Read(reply)
-		if err != nil || string(reply[:number-1]) == "EXIT" {
-			if !errors.Is(err, io.EOF) && string(reply[:number-1]) != "EXIT" {
-				log.Print(err)
-
-				return
-			}
-
-			// remove connection from chat
-			for n, element := range conns {
-				if conn == element {
-					conns = append(conns[:n], conns[n+1:]...)
-				}
-
-				_, err = element.Write([]byte(fmt.Sprintf(" - Bye %s - \n", name)))
-				if err != nil {
-					log.Print(err)
-
-					return
-				}
-			}
-
-			fmt.Println(string(name), "offline")
-
-			return
-		}
-
-		if string(reply[:number]) == "\n" {
-			continue
-		}
-
-		// write message to all connections
-		for _, element := range conns {
-			if element != conn {
-				// check prefix, to not apply formatting
-				if strings.HasPrefix(string(reply[:number]), "PUBK-") {
-					_, err = element.Write(reply[:number])
-					if err != nil {
-						log.Print(err)
-
-						return
-					}
-
-					continue
-				}
-
-				t := time.Now().Format(time.RFC822Z)
-
-				_, err = element.Write([]byte(fmt.Sprintf("%s (%s): %s", name, t, reply[:number])))
-				if err != nil {
-					log.Print(err)
-
-					return
-				}
-			}
-		}
-	}
+	return
 }

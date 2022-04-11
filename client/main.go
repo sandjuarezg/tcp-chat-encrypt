@@ -18,9 +18,11 @@ import (
 	"sync"
 )
 
-const args = 2
-const msgParts = 2
-const lenBuff = 1064
+const (
+	args     = 2
+	msgParts = 2
+	lenBuff  = 1064
+)
 
 var errLimit = errors.New("ERROR: Chat full, try again later")
 
@@ -160,8 +162,8 @@ func readFromConn(conn net.Conn, privKey *rsa.PrivateKey, pubKeyFriend *rsa.Publ
 //  @return1 (err): error variable
 func writeOnConn(conn net.Conn, pubKeyFriend *rsa.PublicKey) (err error) {
 	var (
-		reply = make([]byte, lenBuff)
-		mess  []byte
+		reply   = make([]byte, lenBuff)
+		message []byte
 	)
 
 	number, err := bufio.NewReader(os.Stdin).Read(reply)
@@ -169,16 +171,16 @@ func writeOnConn(conn net.Conn, pubKeyFriend *rsa.PublicKey) (err error) {
 		return
 	}
 
-	mess = reply[:number]
+	message = reply[:number]
 
 	if pubKeyFriend != nil {
-		mess, err = rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKeyFriend, reply[:number], nil)
+		message, err = rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKeyFriend, reply[:number], nil)
 		if err != nil {
 			return
 		}
 	}
 
-	_, err = conn.Write(mess)
+	_, err = conn.Write(message)
 	if err != nil {
 		return
 	}
@@ -190,7 +192,7 @@ func writeOnConn(conn net.Conn, pubKeyFriend *rsa.PublicKey) (err error) {
 //  @param1 (mess): message
 //
 //  @return1 (format): part of the message format
-//  @return1 (text): part of the message text
+//  @return2 (text): part of the message text
 func getFormatAndTextFromMessage(mess []byte) (format, text []byte) {
 	messSlice := bytes.Split(mess, []byte(": "))
 
